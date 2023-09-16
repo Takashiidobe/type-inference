@@ -71,6 +71,42 @@ impl Value {
     }
 }
 
+impl From<HashMap<Value, Value>> for Expr {
+    fn from(value: HashMap<Value, Value>) -> Self {
+        Expr::Value(Value::Map(value))
+    }
+}
+
+impl From<i64> for Expr {
+    fn from(value: i64) -> Self {
+        Expr::Value(Value::Integer(value))
+    }
+}
+
+impl From<&str> for Expr {
+    fn from(value: &str) -> Self {
+        Expr::Value(Value::String(value.to_string()))
+    }
+}
+
+impl From<String> for Expr {
+    fn from(value: String) -> Self {
+        Expr::Value(Value::String(value))
+    }
+}
+
+impl From<bool> for Expr {
+    fn from(value: bool) -> Self {
+        Expr::Value(Value::Bool(value))
+    }
+}
+
+impl From<Vec<Value>> for Expr {
+    fn from(value: Vec<Value>) -> Self {
+        Expr::Value(Value::List(value))
+    }
+}
+
 impl From<HashMap<Value, Value>> for Value {
     fn from(value: HashMap<Value, Value>) -> Self {
         Value::Map(value)
@@ -109,8 +145,9 @@ impl From<Vec<Value>> for Value {
 
 #[derive(Debug, Clone)]
 pub enum Expr {
-    Var(String, Value),
+    Var(String, Vec<Type>, Box<Expr>),
     Value(Value),
+    If(Box<Expr>, Box<Expr>),
 }
 
 impl From<Value> for Expr {
@@ -122,7 +159,9 @@ impl From<Value> for Expr {
 impl PartialEq for Expr {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Expr::Var(self_name, _), Expr::Var(other_name, _)) => self_name == other_name,
+            (Expr::Var(self_name, self_types, _), Expr::Var(other_name, other_types, _)) => {
+                self_name == other_name && self_types == other_types
+            }
             (Expr::Value(self_val), Expr::Value(other_val)) => self_val == other_val,
             _ => false,
         }
@@ -131,10 +170,15 @@ impl PartialEq for Expr {
 
 #[allow(dead_code)]
 impl Expr {
-    fn type_of(&self) -> Type {
+    fn type_of(&self) -> Vec<Type> {
         match self {
-            Expr::Var(_, value) => value.type_of(),
-            Expr::Value(value) => value.type_of(),
+            Expr::Var(_, types, _) => types.to_vec(),
+            Expr::Value(value) => vec![value.type_of()],
+            Expr::If(left, right) => {
+                let mut left = left.type_of();
+                left.extend(right.type_of());
+                left
+            }
         }
     }
 }
@@ -183,6 +227,107 @@ impl Parser {
 
     fn is_bool(&self) -> bool {
         self.is_true() || self.is_false()
+    }
+
+    fn is_type_decl(&self) -> bool {
+        self.curr_char() == Some(':')
+    }
+
+    fn consume_type_decl(&mut self) -> Vec<Type> {
+        let mut hashset = HashSet::new();
+        self.consume_char(':');
+        self.skip_whitespace();
+        while self.curr_char().is_some_and(|x| x.is_ascii_alphabetic()) {
+            let t = if self.is_int_type() {
+                self.consume_int_type()
+            } else if self.is_bool_type() {
+                self.consume_bool_type()
+            } else if self.is_str_type() {
+                self.consume_str_type()
+            } else if self.is_list_type() {
+                self.consume_list_type()
+            } else if self.is_map_type() {
+                self.consume_map_type()
+            } else {
+                panic!("Could not parse type");
+            };
+            hashset.insert(t);
+            self.skip_whitespace();
+            if !self.consume_char('|') {
+                break;
+            }
+            self.skip_whitespace();
+        }
+        let mut types: Vec<Type> = hashset.into_iter().collect();
+        types.sort();
+        types
+    }
+
+    fn is_int_type(&self) -> bool {
+        self.peek(3) == Some(&['i', '6', '4'])
+    }
+
+    fn consume_int_type(&mut self) -> Type {
+        self.skip(3);
+        Type::Integer
+    }
+
+    fn is_bool_type(&self) -> bool {
+        self.peek(4) == Some(&['b', 'o', 'o', 'l'])
+    }
+
+    fn consume_bool_type(&mut self) -> Type {
+        self.skip(4);
+        Type::Bool
+    }
+
+    fn is_str_type(&self) -> bool {
+        self.peek(3) == Some(&['s', 't', 'r'])
+    }
+
+    fn consume_str_type(&mut self) -> Type {
+        self.skip(3);
+        Type::String
+    }
+
+    fn is_list_type(&self) -> bool {
+        self.peek(4) == Some(&['l', 'i', 's', 't'])
+    }
+
+    fn consume_list_type(&mut self) -> Type {
+        for c in ['l', 'i', 's', 't'] {
+            self.consume_char(c);
+        }
+        self.skip_whitespace();
+        self.consume_char('[');
+        self.skip_whitespace();
+        let types = self.consume_type_decl();
+        self.skip_whitespace();
+        self.consume_char(']');
+        self.skip_whitespace();
+        Type::List(types)
+    }
+
+    fn is_map_type(&self) -> bool {
+        self.peek(3) == Some(&['m', 'a', 'p'])
+    }
+
+    fn consume_map_type(&mut self) -> Type {
+        for c in ['m', 'a', 'p'] {
+            self.consume_char(c);
+        }
+        self.skip_whitespace();
+        self.consume_char('[');
+        self.skip_whitespace();
+        let key_types = self.consume_type_decl();
+        self.skip_whitespace();
+        self.consume_char(',');
+        self.skip_whitespace();
+        let val_types = self.consume_type_decl();
+        self.skip_whitespace();
+        self.consume_char(']');
+        self.skip_whitespace();
+        Type::Map(key_types, val_types)
     }
 
     fn is_true(&self) -> bool {
@@ -301,12 +446,19 @@ impl Parser {
         self.skip_whitespace();
         let name = self.consume_name();
         self.skip_whitespace();
+        let mut types = vec![];
+        if self.is_type_decl() {
+            types = self.consume_type_decl();
+        }
         self.consume_char('=');
         self.skip_whitespace();
         let value = self.consume_value();
+        if types.is_empty() {
+            types.push(value.type_of())
+        }
         self.skip_whitespace();
         self.consume_char(';');
-        Expr::Var(name, value)
+        Expr::Var(name, types, Box::new(Expr::from(value)))
     }
 
     fn consume_map_entry(&mut self) -> (Value, Value) {
@@ -410,7 +562,7 @@ mod tests {
             parser
                 .parse()
                 .into_iter()
-                .map(|x| x.type_of())
+                .flat_map(|x| x.type_of())
                 .collect::<Vec<Type>>(),
             expected
         );
@@ -419,7 +571,14 @@ mod tests {
     #[test]
     fn parse_int_var() {
         let input = "let x = 10;";
-        test(input, vec![Expr::Var("x".to_string(), Value::from(10))]);
+        test(
+            input,
+            vec![Expr::Var(
+                "x".to_string(),
+                vec![Type::Integer],
+                Box::new(Expr::from(10)),
+            )],
+        );
     }
 
     #[test]
@@ -427,31 +586,91 @@ mod tests {
         let input = "let x = \"xd\";";
         test(
             input,
-            vec![Expr::Var("x".to_string(), Value::from("xd".to_string()))],
+            vec![Expr::Var(
+                "x".to_string(),
+                vec![Type::String],
+                Box::new(Expr::from("xd".to_string())),
+            )],
         );
     }
 
     #[test]
     fn parse_true_var() {
         let input = "let x = true;";
-        test(input, vec![Expr::Var("x".to_string(), Value::from(true))]);
+        test(
+            input,
+            vec![Expr::Var(
+                "x".to_string(),
+                vec![Type::Bool],
+                Box::new(Expr::from(true)),
+            )],
+        );
     }
 
     #[test]
     fn parse_false_var() {
         let input = "let x = false;";
-        test(input, vec![Expr::Var("x".to_string(), Value::from(false))]);
-    }
-
-    #[test]
-    fn parse_list() {
-        let input = "let x = [1,2,3];";
         test(
             input,
             vec![Expr::Var(
                 "x".to_string(),
-                Value::from(vec![1.into(), 2.into(), 3.into()]),
+                vec![Type::Bool],
+                Box::new(Expr::from(false)),
             )],
+        );
+    }
+
+    #[test]
+    fn parse_var_with_type_annotation() {
+        let input = "let x: i64 | bool | str = false;";
+        test(
+            input,
+            vec![Expr::Var(
+                "x".to_string(),
+                vec![Type::Bool, Type::Integer, Type::String],
+                Box::new(Expr::from(false)),
+            )],
+        );
+    }
+
+    #[test]
+    fn parse_list_with_type_annotation() {
+        let input = "let x: list[i64 | str | bool] = [false];";
+        test(
+            input,
+            vec![Expr::Var(
+                "x".to_string(),
+                vec![Type::List(vec![Type::Bool, Type::Integer, Type::String])],
+                Box::new(Expr::from(Value::from(vec![false.into()]))),
+            )],
+        );
+    }
+
+    #[test]
+    fn parse_map_with_type_annotation() {
+        let input = "let x: map[i64 | str | bool,i64 | str | bool] = {10: false};";
+        test(
+            input,
+            vec![Expr::Var(
+                "x".to_string(),
+                vec![Type::Map(
+                    vec![Type::Bool, Type::Integer, Type::String],
+                    vec![Type::Bool, Type::Integer, Type::String],
+                )],
+                Box::new(Expr::from(Value::from(HashMap::from([(
+                    Value::Integer(10),
+                    Value::Bool(false),
+                )])))),
+            )],
+        );
+    }
+
+    #[test]
+    fn parse_list() {
+        let input = "[1,2,3]";
+        test(
+            input,
+            vec![Expr::from(Value::from(vec![1.into(), 2.into(), 3.into()]))],
         );
     }
 
@@ -468,20 +687,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_sublist() {
-        let input = "let x = [[1],2,3];";
-        test(
+    fn parse_map_type() {
+        let input = "{ \"key\" : 2, [1] : false }";
+        test_types(
             input,
-            vec![Expr::Var(
-                "x".to_string(),
-                Value::from(vec![Value::from(vec![1.into()]), 2.into(), 3.into()]),
+            vec![Type::Map(
+                vec![Type::String, Type::List(vec![Type::Integer])],
+                vec![Type::Bool, Type::Integer],
             )],
         );
     }
 
     #[test]
+    fn parse_sublist() {
+        let input = "[[1],2,3]";
+        test(
+            input,
+            vec![Expr::from(Value::from(vec![
+                Value::from(vec![1.into()]),
+                2.into(),
+                3.into(),
+            ]))],
+        );
+    }
+
+    #[test]
     fn sublist_type() {
-        let input = "[[1],2,3];";
+        let input = "[[1],2,3]";
         test_types(
             input,
             vec![Type::List(vec![
