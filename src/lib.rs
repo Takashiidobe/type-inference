@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -14,8 +14,8 @@ pub enum Type {
     Bool,
     Integer,
     String,
-    List,
-    Map,
+    List(Vec<Type>),
+    Map(Vec<Type>, Vec<Type>),
 }
 
 impl std::hash::Hash for Value {
@@ -45,8 +45,28 @@ impl Value {
             Value::Bool(_) => Type::Bool,
             Value::Integer(_) => Type::Integer,
             Value::String(_) => Type::String,
-            Value::List(_) => Type::List,
-            Value::Map(_) => Type::Map,
+            Value::List(list) => {
+                let mut set = HashSet::new();
+                for item in list {
+                    set.insert(item.type_of());
+                }
+                let mut list: Vec<Type> = set.into_iter().collect();
+                list.sort();
+                Type::List(list)
+            }
+            Value::Map(map) => {
+                let mut keys = HashSet::new();
+                let mut vals = HashSet::new();
+                for (key, val) in map {
+                    keys.insert(key.type_of());
+                    vals.insert(val.type_of());
+                }
+                let mut key_list: Vec<Type> = keys.into_iter().collect();
+                let mut val_list: Vec<Type> = vals.into_iter().collect();
+                key_list.sort();
+                val_list.sort();
+                Type::Map(key_list, val_list)
+            }
         }
     }
 }
@@ -461,7 +481,34 @@ mod tests {
 
     #[test]
     fn sublist_type() {
-        let input = "let x = [[1],2,3];";
-        test_types(input, vec![Type::List]);
+        let input = "[[1],2,3];";
+        test_types(
+            input,
+            vec![Type::List(vec![
+                Type::Integer,
+                Type::List(vec![Type::Integer]),
+            ])],
+        );
+    }
+
+    #[test]
+    fn mixed_type_list() {
+        let input = "[true, false, \"hello\", 1, { 1: 2, true: [1, true , \"str\"] }, [3]];";
+        test_types(
+            input,
+            vec![Type::List(vec![
+                Type::Bool,
+                Type::Integer,
+                Type::String,
+                Type::List(vec![Type::Integer]),
+                Type::Map(
+                    vec![Type::Bool, Type::Integer],
+                    vec![
+                        Type::Integer,
+                        Type::List(vec![Type::Bool, Type::Integer, Type::String]),
+                    ],
+                ),
+            ])],
+        );
     }
 }
